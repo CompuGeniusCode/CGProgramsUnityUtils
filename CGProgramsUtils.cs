@@ -249,7 +249,10 @@ namespace CGPrograms
             folders = permanentFolders.ToList();
             if (!EditorPrefs.HasKey(foldersKey)) return;
 
-            var savedFolders = EditorPrefs.GetString(foldersKey).Split(';');
+            var saved = EditorPrefs.GetString(foldersKey);
+            if (string.IsNullOrEmpty(saved)) return;
+
+            var savedFolders = saved.Split(';');
             folders.AddRange(savedFolders);
         }
 
@@ -263,10 +266,12 @@ namespace CGPrograms
             gameObjects.Clear();
             if (!EditorPrefs.HasKey(gameObjectsKey)) return;
 
-            var saveGameObjects = EditorPrefs.GetString(gameObjectsKey).Split(';');
+            var saved = EditorPrefs.GetString(gameObjectsKey);
+            if (string.IsNullOrEmpty(saved)) return;
+
+            var saveGameObjects = saved.Split(';');
             gameObjects.AddRange(saveGameObjects);
         }
-
 
         private void EditScript()
         {
