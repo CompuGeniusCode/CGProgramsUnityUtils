@@ -3,10 +3,13 @@
  * https://www.cgprograms.com
  */
 
+#if UNITY_EDITOR
+
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEditorInternal;
@@ -31,6 +34,16 @@ namespace CGPrograms
         private string gameObjectsKey;
 
         private LayerMask selectedLayerMask;
+
+        private Material materialToReplace;
+        private Material materialToReplaceWith;
+
+        private Shader shaderToReplace;
+        private Shader shaderToReplaceWith;
+
+        private string renameText;
+
+        public GameObject prefabToReplaceWith;
 
         private Vector2 scrollPosition;
 
@@ -170,6 +183,8 @@ namespace CGPrograms
                 RemoveMissingMaterials();
             if (GUILayout.Button("Remove Missing Scripts", GUILayout.Width(position.width * 0.9f)))
                 RemoveMissingScripts();
+            if (GUILayout.Button("Export MeshBaker Mesh", GUILayout.Width(position.width * 0.9f)))
+                ExportMeshBakerMesh();
 
             if (GUILayout.Button("Clear Scene Lighting", GUILayout.Width(position.width * 0.9f)))
                 ClearSceneLighting();
@@ -189,6 +204,42 @@ namespace CGPrograms
             if (GUILayout.Button("Select All Objects on Selected Layers", GUILayout.Width(position.width * 0.9f)))
             {
                 SelectObjectsOnLayers(selectedLayerMask);
+            }
+
+            GUILayout.Space(10);
+            GUILayout.Label("Replace Material", EditorStyles.boldLabel);
+            materialToReplace = (Material)EditorGUILayout.ObjectField("Material to Replace", materialToReplace, typeof(Material), false);
+            materialToReplaceWith = (Material)EditorGUILayout.ObjectField("Material to Replace With", materialToReplaceWith, typeof(Material), false);
+
+            if (GUILayout.Button("Replace Material in Scene", GUILayout.Width(position.width * 0.9f)))
+            {
+                ReplaceMaterialInScene(materialToReplace, materialToReplaceWith);
+            }
+
+            GUILayout.Space(10);
+            GUILayout.Label("Replace Shader in Selection", EditorStyles.boldLabel);
+            shaderToReplace = (Shader)EditorGUILayout.ObjectField("Shader to Replace", shaderToReplace, typeof(Shader), false);
+            shaderToReplaceWith = (Shader)EditorGUILayout.ObjectField("Shader to Replace With", shaderToReplaceWith, typeof(Shader), false);
+
+            if (GUILayout.Button("Replace Shader in Selection", GUILayout.Width(position.width * 0.9f)))
+            {
+                ReplaceShaderInSelection(shaderToReplace, shaderToReplaceWith);
+            }
+
+            GUILayout.Space(10);
+            GUILayout.Label("Rename Selected Objects", EditorStyles.boldLabel);
+            renameText = EditorGUILayout.TextField("New Name", renameText);
+
+            if (GUILayout.Button("Rename Selected Objects", GUILayout.Width(position.width * 0.9f)))
+            {
+                RenameSelectedObjects(renameText);
+            }
+
+            GUILayout.Label("Mass Replace Prefabs", EditorStyles.boldLabel);
+            prefabToReplaceWith = (GameObject)EditorGUILayout.ObjectField("New Prefab", prefabToReplaceWith, typeof(GameObject), false);
+            if (GUILayout.Button("Replace Selected Prefabs", GUILayout.Width(position.width * 0.9f)))
+            {
+                MassReplacePrefabs(prefabToReplaceWith);
             }
 
             EditorGUILayout.EndScrollView();
@@ -281,10 +332,21 @@ namespace CGPrograms
 
         private static void FindUnnecessaryMeshes()
         {
-            var meshFilters = FindObjectsOfType<MeshFilter>();
+            var meshFilters = FindObjectsOfType<MeshFilter>(true);
             var unnecessaryMeshes = meshFilters.Where(meshFilter =>
-                !meshFilter.GetComponent<MeshRenderer>() && !meshFilter.GetComponent<Collider>() &&
-                meshFilter.transform.childCount == 0).ToList();
+            {
+                var hasRenderer = meshFilter.GetComponent<MeshRenderer>();
+                var hasCollider = meshFilter.GetComponent<Collider>();
+                var hasSkinned = meshFilter.GetComponent<SkinnedMeshRenderer>();
+                var noChildren = meshFilter.transform.childCount == 0;
+
+                if (hasCollider || hasSkinned || !noChildren) return false;
+                if (!hasRenderer && !hasCollider && !hasSkinned) return true;
+
+                var materials = hasRenderer.sharedMaterials;
+                return materials == null || materials.Length == 0 || materials.All(m => !m);
+            }).ToList();
+
             Selection.objects = unnecessaryMeshes.Select(meshFilter => meshFilter.gameObject).ToArray<Object>();
         }
 
@@ -349,6 +411,243 @@ namespace CGPrograms
             Selection.objects = matchingObjects;
         }
 
+        private static void ExportMeshBakerMesh()
+        {
+            var go = Selection.activeGameObject;
+            if (!go)
+            {
+                Debug.LogError("No GameObject selected.");
+                return;
+            }
+
+            Mesh mesh = null;
+            var transform = go.transform;
+
+            var mf = go.GetComponent<MeshFilter>();
+            if (mf)
+            {
+                mesh = mf.sharedMesh;
+            }
+            else
+            {
+                var smr = go.GetComponent<SkinnedMeshRenderer>();
+                if (smr)
+                {
+                    mesh = new Mesh();
+                    smr.BakeMesh(mesh);
+                }
+            }
+
+            if (!mesh)
+            {
+                Debug.LogError("No mesh found on selected GameObject.");
+                return;
+            }
+
+            var path = EditorUtility.SaveFilePanel("Export OBJ", "", go.name + ".obj", "obj");
+            if (string.IsNullOrEmpty(path)) return;
+
+            using (var sw = new StreamWriter(path))
+            {
+                sw.Write(MeshToString(mesh, transform));
+            }
+
+            Debug.Log("Exported mesh to: " + path);
+        }
+
+        private static string MeshToString(Mesh mesh, Transform transform)
+        {
+            var sb = new StringBuilder();
+
+            var vertices = mesh.vertices;
+            var normals = mesh.normals;
+            var uvs = mesh.uv;
+
+            foreach (var v in vertices)
+            {
+                var wv = transform.TransformPoint(v);
+                sb.AppendLine($"v {wv.x} {wv.y} {wv.z}");
+            }
+
+            foreach (var n in normals)
+            {
+                var wn = transform.TransformDirection(n);
+                sb.AppendLine($"vn {wn.x} {wn.y} {wn.z}");
+            }
+
+            foreach (var uv in uvs) sb.AppendLine($"vt {uv.x} {uv.y}");
+
+            for (var i = 0; i < mesh.subMeshCount; i++)
+            {
+                var tris = mesh.GetTriangles(i);
+                for (var j = 0; j < tris.Length; j += 3)
+                {
+                    var a = tris[j + 0] + 1;
+                    var b = tris[j + 1] + 1;
+                    var c = tris[j + 2] + 1;
+                    sb.AppendLine($"f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}");
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        private static void ReplaceMaterialInScene(Material from, Material to)
+        {
+            if (!from || !to)
+            {
+                Debug.LogError("Please assign both materials.");
+                return;
+            }
+
+            var renderers = FindObjectsOfType<MeshRenderer>(true);
+            foreach (var renderer in renderers)
+            {
+                var materials = renderer.sharedMaterials;
+                var changed = false;
+                for (var i = 0; i < materials.Length; i++)
+                {
+                    if (materials[i] != from) continue;
+                    materials[i] = to;
+                    changed = true;
+                }
+
+                if (!changed) continue;
+                renderer.sharedMaterials = materials;
+                EditorUtility.SetDirty(renderer);
+            }
+            Debug.Log("Material replacement complete.");
+        }
+        
+        private static void ReplaceShaderInSelection(Shader fromShader, Shader toShader)
+        {
+            if (!fromShader || !toShader)
+            {
+                Debug.LogError("Please assign both source and target shaders.");
+                return;
+            }
+
+            foreach (var obj in Selection.objects)
+            {
+                if (obj is Material mat && mat.shader == fromShader)
+                {
+                    mat.shader = toShader;
+                    EditorUtility.SetDirty(mat);
+                }
+            }
+
+            foreach (var obj in Selection.gameObjects)
+            {
+                var renderers = obj.GetComponentsInChildren<Renderer>(true);
+                foreach (var renderer in renderers)
+                {
+                    var materials = renderer.sharedMaterials;
+                    var changed = false;
+                    foreach (var mat in materials)
+                    {
+                        if (!mat || mat.shader != fromShader) continue;
+                        
+                        mat.shader = toShader;
+                        changed = true;
+                    }
+
+                    if (!changed) continue;
+                    
+                    renderer.sharedMaterials = materials;
+                    EditorUtility.SetDirty(renderer);
+                }
+            }
+            Debug.Log("Shader replacement in selection complete.");
+        }
+
+        private static void RenameSelectedObjects(string newName)
+        {
+            if (string.IsNullOrWhiteSpace(newName)) return;
+            foreach (var obj in Selection.objects)
+            {
+                if (obj is not GameObject go) continue;
+                go.name = newName;
+                EditorUtility.SetDirty(go);
+            }
+        }
+
+        private static void MassReplacePrefabs(GameObject newPrefab)
+        {
+            if (!newPrefab)
+            {
+                Debug.LogError("Please assign a prefab to replace with.");
+                return;
+            }
+
+            var selectedObjects = Selection.gameObjects;
+            foreach (var oldObj in selectedObjects)
+            {
+                var parent = oldObj.transform.parent;
+                var siblingIndex = oldObj.transform.GetSiblingIndex();
+
+                var newObj = (GameObject)PrefabUtility.InstantiatePrefab(newPrefab, oldObj.scene);
+
+                newObj.transform.SetParent(parent, false);
+                newObj.transform.localPosition = oldObj.transform.localPosition;
+                newObj.transform.localRotation = oldObj.transform.localRotation;
+                newObj.transform.localScale = oldObj.transform.localScale;
+                newObj.transform.SetSiblingIndex(siblingIndex);
+
+                var oldComponents = oldObj.GetComponents<MonoBehaviour>();
+                var newComponents = newObj.GetComponents<MonoBehaviour>();
+                foreach (var oldComp in oldComponents)
+                {
+                    var type = oldComp.GetType();
+                    var newComp = newComponents.FirstOrDefault(c => c.GetType() == type);
+                    if (!newComp) continue;
+
+                    var fields = type.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    foreach (var field in fields)
+                    {
+                        if (field.IsDefined(typeof(SerializeField), true) || field.IsPublic)
+                        {
+                            field.SetValue(newComp, field.GetValue(oldComp));
+                        }
+                    }
+                }
+
+                var allBehaviours = FindObjectsOfType<MonoBehaviour>(true);
+                foreach (var behaviour in allBehaviours)
+                {
+                    var type = behaviour.GetType();
+                    var fields = type.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    foreach (var field in fields)
+                    {
+                        if (!typeof(Object).IsAssignableFrom(field.FieldType)) continue;
+
+                        var value = field.GetValue(behaviour);
+                        if (value == null) continue;
+
+                        if (ReferenceEquals(value, oldObj))
+                        {
+                            field.SetValue(behaviour, newObj);
+                            EditorUtility.SetDirty(behaviour);
+                        }
+                        else if (value is Component oldComp)
+                        {
+                            if (oldComp.gameObject != oldObj) continue;
+
+                            var newComp = newObj.GetComponent(oldComp.GetType());
+                            if (!newComp) continue;
+
+                            field.SetValue(behaviour, newComp);
+                            EditorUtility.SetDirty(behaviour);
+                        }
+                    }
+                }
+
+                Undo.RegisterCreatedObjectUndo(newObj, "Replace Prefab");
+                Undo.DestroyObjectImmediate(oldObj);
+            }
+            Debug.Log("Mass prefab replacement complete.");
+        }
+
+
         #endregion
     }
 }
@@ -371,3 +670,6 @@ public class CoroutineRunner : ScriptableObject
         };
     }
 }
+
+
+#endif
