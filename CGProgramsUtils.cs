@@ -41,6 +41,18 @@ namespace CGPrograms
         private Shader shaderToReplace;
         private Shader shaderToReplaceWith;
 
+        private readonly string[] texturePlatforms =
+        {
+            "Default", "Standalone", "Android", "iPhone", "tvOS", "WebGL", "Windows Store Apps",
+            "PS4", "PS5", "XboxOne", "Switch"
+        };
+        private int sourcePlatformIndex = 2;
+        private int targetPlatformMask = 0;
+        private bool copyIfSourceNotOverridden = false;
+        private const string Pref_SourceIdx = "CGP_CopyTex_SourceIdx";
+        private const string Pref_TargetMask = "CGP_CopyTex_TargetMask";
+        private const string Pref_CopyIfNotOverridden = "CGP_CopyTex_CopyIfNotOverridden";
+
         private string renameText;
 
         public GameObject prefabToReplaceWith;
@@ -55,6 +67,10 @@ namespace CGPrograms
         {
             foldersKey = $"{Application.productName}_CGProgramsUtilsFolders";
             gameObjectsKey = $"{Application.productName}_CGProgramsUtilsGameObjects";
+
+            if (EditorPrefs.HasKey(Pref_SourceIdx)) sourcePlatformIndex = EditorPrefs.GetInt(Pref_SourceIdx);
+            if (EditorPrefs.HasKey(Pref_TargetMask)) targetPlatformMask = EditorPrefs.GetInt(Pref_TargetMask);
+            if (EditorPrefs.HasKey(Pref_CopyIfNotOverridden)) copyIfSourceNotOverridden = EditorPrefs.GetBool(Pref_CopyIfNotOverridden);
 
             RefreshScenes();
             LoadFolders();
@@ -224,6 +240,33 @@ namespace CGPrograms
             if (GUILayout.Button("Replace Shader in Selection", GUILayout.Width(position.width * 0.9f)))
             {
                 ReplaceShaderInSelection(shaderToReplace, shaderToReplaceWith);
+            }
+
+            GUILayout.Space(10);
+            GUILayout.Label("Copy Texture Import Settings", EditorStyles.boldLabel);
+            sourcePlatformIndex = EditorGUILayout.Popup("Copy From", sourcePlatformIndex, texturePlatforms);
+            var disabled = new bool[texturePlatforms.Length];
+            disabled[sourcePlatformIndex] = true;
+            using (new EditorGUI.DisabledScope(true))
+            {
+                EditorGUILayout.LabelField("Target Platforms (source is disabled below)");
+            }
+            targetPlatformMask = MaskFieldWithDisabled("Copy To", targetPlatformMask, texturePlatforms, disabled);
+
+            copyIfSourceNotOverridden = EditorGUILayout.Toggle(
+                new GUIContent("Copy When Source Not Overridden",
+                    "If OFF and source is not overridden, skip. Has no effect when source == Default."),
+                copyIfSourceNotOverridden);
+
+            EditorPrefs.SetInt(Pref_SourceIdx, sourcePlatformIndex);
+            EditorPrefs.SetInt(Pref_TargetMask, targetPlatformMask);
+            EditorPrefs.SetBool(Pref_CopyIfNotOverridden, copyIfSourceNotOverridden);
+
+            if (GUILayout.Button("Execute Copy", GUILayout.Width(position.width * 0.9f)))
+            {
+                var from = texturePlatforms[sourcePlatformIndex];
+                var targets = GetSelectedTargets(texturePlatforms, targetPlatformMask, sourcePlatformIndex);
+                CopyPlatformTextureSettings(from, targets, copyIfSourceNotOverridden);
             }
 
             GUILayout.Space(10);
@@ -518,7 +561,7 @@ namespace CGPrograms
             }
             Debug.Log("Material replacement complete.");
         }
-        
+
         private static void ReplaceShaderInSelection(Shader fromShader, Shader toShader)
         {
             if (!fromShader || !toShader)
@@ -529,11 +572,10 @@ namespace CGPrograms
 
             foreach (var obj in Selection.objects)
             {
-                if (obj is Material mat && mat.shader == fromShader)
-                {
-                    mat.shader = toShader;
-                    EditorUtility.SetDirty(mat);
-                }
+                if (obj is not Material mat || mat.shader != fromShader) continue;
+
+                mat.shader = toShader;
+                EditorUtility.SetDirty(mat);
             }
 
             foreach (var obj in Selection.gameObjects)
@@ -546,18 +588,128 @@ namespace CGPrograms
                     foreach (var mat in materials)
                     {
                         if (!mat || mat.shader != fromShader) continue;
-                        
+
                         mat.shader = toShader;
                         changed = true;
                     }
 
                     if (!changed) continue;
-                    
+
                     renderer.sharedMaterials = materials;
                     EditorUtility.SetDirty(renderer);
                 }
             }
             Debug.Log("Shader replacement in selection complete.");
+        }
+
+        private static List<string> GetSelectedTargets(string[] all, int mask, int sourceIdx)
+        {
+            return all.Where((t, i) => i != sourceIdx && (mask & (1 << i)) != 0).ToList();
+        }
+
+        private static int MaskFieldWithDisabled(string label, int mask, string[] displayed, bool[] disabled)
+        {
+            var contents = new GUIContent[displayed.Length];
+            for (var i = 0; i < displayed.Length; i++)
+            {
+                contents[i] = new GUIContent(disabled[i] ? $"{displayed[i]} (source)" : displayed[i]);
+            }
+
+            EditorGUILayout.BeginVertical(GUI.skin.box);
+            EditorGUILayout.LabelField(label, EditorStyles.miniBoldLabel);
+            for (var i = 0; i < displayed.Length; i++)
+            {
+                using (new EditorGUI.DisabledScope(disabled[i]))
+                {
+                    var on = (mask & (1 << i)) != 0;
+                    var toggled = EditorGUILayout.ToggleLeft(contents[i], on);
+                    if (toggled) mask |= (1 << i);
+                    else mask &= ~(1 << i);
+                }
+            }
+
+            EditorGUILayout.EndVertical();
+            return mask;
+        }
+
+        private static void CopyPlatformTextureSettings(string sourcePlatform, List<string> targetPlatforms,
+            bool copyIfSourceNotOverridden)
+        {
+            if (targetPlatforms == null || targetPlatforms.Count == 0)
+            {
+                Debug.LogWarning("No target platforms selected.");
+                return;
+            }
+
+            var guids = AssetDatabase.FindAssets("t:Texture");
+            var total = guids.Length;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (var i = 0; i < total; i++)
+                {
+                    var guid = guids[i];
+                    var path = AssetDatabase.GUIDToAssetPath(guid);
+                    EditorUtility.DisplayProgressBar($"Copy {sourcePlatform} → targets", path, (float)i / total);
+
+                    if (AssetImporter.GetAtPath(path) is not TextureImporter ti) continue;
+
+                    var src = ti.GetPlatformTextureSettings(sourcePlatform);
+
+                    var isDefault = string.Equals(sourcePlatform, "Default");
+                    switch (isDefault)
+                    {
+                        case false when !src.overridden && !copyIfSourceNotOverridden:
+                        case false when src.maxTextureSize == 0 && !copyIfSourceNotOverridden:
+                            continue;
+                    }
+
+                    foreach (var target in targetPlatforms)
+                    {
+                        if (string.Equals(target, sourcePlatform)) continue;
+
+                        var dst = ti.GetPlatformTextureSettings(target);
+
+                        dst.name = target;
+                        dst.overridden = true;
+
+                        dst.maxTextureSize = src.maxTextureSize > 0 ? src.maxTextureSize : 2048;
+                        dst.resizeAlgorithm = src.resizeAlgorithm;
+                        dst.compressionQuality = src.compressionQuality;
+                        dst.crunchedCompression = src.crunchedCompression;
+
+                        dst.format = src.format;
+
+                        if (TrySetPlatform(ti, dst)) continue;
+                        dst.format = TextureImporterFormat.Automatic;
+                        TrySetPlatform(ti, dst);
+                    }
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                EditorUtility.ClearProgressBar();
+            }
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+            return;
+
+            static bool TrySetPlatform(TextureImporter ti, TextureImporterPlatformSettings ps)
+            {
+                try
+                {
+                    ti.SetPlatformTextureSettings(ps);
+                    ti.SaveAndReimport();
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
         }
 
         private static void RenameSelectedObjects(string newName)
